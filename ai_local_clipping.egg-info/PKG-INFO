@@ -1,0 +1,8 @@
+Metadata-Version: 2.4
+Name: ai-local-clipping
+Version: 0.1.0
+Summary: CLI local que genera clips para redes sociales con Whisper y Ollama
+Requires-Python: >=3.10
+Requires-Dist: openai-whisper>=20240930
+Provides-Extra: faster
+Requires-Dist: faster-whisper>=1.0.0; extra == "faster"

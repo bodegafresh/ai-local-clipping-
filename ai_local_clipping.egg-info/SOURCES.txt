@@ -1,0 +1,16 @@
+README.md
+pyproject.toml
+ai_local_clipping.egg-info/PKG-INFO
+ai_local_clipping.egg-info/SOURCES.txt
+ai_local_clipping.egg-info/dependency_links.txt
+ai_local_clipping.egg-info/entry_points.txt
+ai_local_clipping.egg-info/requires.txt
+ai_local_clipping.egg-info/top_level.txt
+clipper/__init__.py
+clipper/__main__.py
+clipper/cli.py
+clipper/media.py
+clipper/ollama.py
+clipper/schema.py
+clipper/transcribe.py
+tests/test_clipper.py
