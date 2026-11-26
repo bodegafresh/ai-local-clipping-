@@ -41,6 +41,16 @@ RESPONSE_FORMAT: dict[str, Any] = {
                     "tags": {"type": "array", "items": {"type": "string"}},
                     "razon": {"type": "string"},
                     "score": {"type": "number"},
+                    "rank": {"type": "integer"},
+                    "score_total": {"type": "number"},
+                    "subestilo": {"type": "string"},
+                    "gancho_3s": {"type": "string"},
+                    "razonamiento_editorial": {"type": "string"},
+                    "evidencia_acustica_visual": {"type": "string"},
+                    "hook_visual_pantalla": {"type": "string"},
+                    "titulo_corto": {"type": "string"},
+                    "descripcion_redes": {"type": "string"},
+                    "hashtags": {"type": "array", "items": {"type": "string"}},
                 },
                 "required": ["inicio", "fin", "titulo", "descripcion", "tags", "razon", "score"],
             },
@@ -51,9 +61,85 @@ RESPONSE_FORMAT: dict[str, Any] = {
 
 SYSTEM_PROMPT = (
     "Eres un editor profesional de clips virales para TikTok, Instagram Reels y YouTube Shorts. "
-    "Trabajas con transcripciones de video en español. Respondes únicamente con JSON válido, "
-    "sin texto adicional, sin bloques de código y sin explicaciones."
+    "Trabajas con transcripciones de video en español enriquecidas con etiquetas acústicas. "
+    "Razon primero la intención editorial, luego fija los tiempos exactos. "
+    "Respondes únicamente con JSON válido, sin texto adicional, sin bloques de código y sin explicaciones."
 )
+
+STYLE_GUIDES: dict[str, str] = {
+    "auto": (
+        "Detecta el género dominante (humor, noticias, venta, educación, debate o gaming) y aplica sus reglas. "
+        "Si el video es vertical y hay exclamaciones cortas con picos de energía, elige gaming. "
+        "Devuelve el género elegido en 'estilo_aplicado'."
+    ),
+    "humor": (
+        "Busca contradicciones absurdas, exageraciones, remates inesperados y sarcasmo respaldado por "
+        "[PAUSA] o [REACCIÓN/RISAS]. Incluye la premisa completa al inicio y extiende el cierre al menos "
+        "2.5 segundos después de la reacción o remate final."
+    ),
+    "noticias": (
+        "Busca el titular o hecho central, cifras clave y consecuencias inmediatas. Abre directo con la "
+        "noticia o dato más fuerte en los primeros 3 segundos y cierra con la conclusión o pregunta abierta."
+    ),
+    "vender": (
+        "Busca la estructura Problema/Dolor -> Solución/Demostración -> Beneficio/Prueba -> Llamado a la acción. "
+        "Elimina introducciones largas: arranca en el problema del cliente y cierra tras la propuesta de valor."
+    ),
+    "educar": (
+        "Busca resolución de problemas técnicos, trucos accionables, comparativas rápidas o desmontar un mito. "
+        "Cada clip debe ser una unidad autocontenida: problema y solución completos sin contexto previo."
+    ),
+    "debate": (
+        "Busca posturas categóricas, frases disruptivas, preguntas retóricas y cruces de opinión intensos. "
+        "Prioriza el gancho emocional o intelectual más fuerte exactamente en el segundo 0.0 del clip."
+    ),
+    "gaming": (
+        "Busca una unidad narrativa Tensión -> Clímax -> Reacción: arranca en el momento de mayor peligro o "
+        "decisión, incluye la jugada decisiva y cierra con la reacción de voz o el resultado. "
+        "Prioriza exclamaciones cortas, picos de energía y sonido de gameplay; no penalices la baja densidad "
+        "de palabras si la acción y el sonido sostienen el clip. Conserva 1.5 segundos antes y después del clímax."
+    ),
+}
+
+VISION_RESPONSE_FORMAT: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "score_visual": {"type": "number"},
+        "coherencia_emocional": {"type": "string"},
+        "atractivo_visual": {"type": "string"},
+        "start_ajustado": {"type": "number"},
+        "end_ajustado": {"type": "number"},
+        "razon": {"type": "string"},
+        "contiene_diagrama_o_texto": {"type": "boolean"},
+        "region_diagrama": {
+            "type": "object",
+            "properties": {
+                "x_pct": {"type": "number"},
+                "y_pct": {"type": "number"},
+                "w_pct": {"type": "number"},
+                "h_pct": {"type": "number"},
+            },
+            "required": ["x_pct", "y_pct", "w_pct", "h_pct"],
+        },
+        "tiene_webcam_esquina": {"type": "boolean"},
+        "posicion_webcam": {
+            "type": "string",
+            "enum": ["bottom-right", "bottom-left", "top-right", "top-left", "none"],
+        },
+    },
+    "required": ["score_visual", "start_ajustado", "end_ajustado"],
+}
+
+
+def style_prompt(style: str) -> str:
+    return STYLE_GUIDES.get(style, STYLE_GUIDES["auto"])
+
+
+def _resolve_style(summary: dict[str, Any], requested: str) -> str:
+    applied = str(summary.get("estilo_aplicado", "")).strip().lower()
+    if applied in STYLE_GUIDES:
+        return applied
+    return requested if requested in STYLE_GUIDES else "auto"
 
 
 class OllamaClient:
@@ -64,8 +150,11 @@ class OllamaClient:
         self.host = raw_host.rstrip("/")
         self.model = model or os.environ.get("OLLAMA_MODEL", "qwen2.5:7b")
         self.timeout = timeout
+        self._models: list[str] | None = None
 
-    def check_model(self) -> None:
+    def list_models(self) -> list[str]:
+        if self._models is not None:
+            return list(self._models)
         try:
             with urlopen(f"{self.host}/api/tags", timeout=10) as response:
                 data = json.load(response)
@@ -73,7 +162,11 @@ class OllamaClient:
             raise ClipError(
                 f"No se pudo conectar con Ollama en {self.host}. Inicia el servicio con 'ollama serve'. Detalle: {exc}"
             ) from exc
-        names = {str(item.get("name", "")) for item in data.get("models", [])}
+        self._models = [str(item.get("name", "")) for item in data.get("models", []) if item.get("name")]
+        return list(self._models)
+
+    def check_model(self) -> None:
+        names = set(self.list_models())
         if self.model not in names and f"{self.model}:latest" not in names:
             available = ", ".join(sorted(names)) or "ninguno"
             raise ClipError(
@@ -88,6 +181,7 @@ class OllamaClient:
             "system": SYSTEM_PROMPT,
             "stream": False,
             "format": RESPONSE_FORMAT,
+            "keep_alive": "5m",
             "options": {"temperature": temperature, "num_ctx": 16384},
         }
         request = Request(
@@ -106,6 +200,32 @@ class OllamaClient:
             raise ClipError(f"Error al consultar Ollama: {exc}") from exc
         return _parse_json(data.get("response", ""))
 
+    def chat_with_images(self, model: str, prompt: str, images: list[str]) -> dict[str, Any]:
+        payload = {
+            "model": model,
+            "messages": [{"role": "user", "content": prompt, "images": images}],
+            "stream": False,
+            "format": VISION_RESPONSE_FORMAT,
+            "keep_alive": "5m",
+            "options": {"temperature": 0.1, "num_ctx": 8192},
+        }
+        request = Request(
+            f"{self.host}/api/chat",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urlopen(request, timeout=self.timeout) as response:
+                data = json.load(response)
+        except HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")
+            raise ClipError(f"Ollama visión devolvió HTTP {exc.code}: {detail[:500]}") from exc
+        except (URLError, TimeoutError, json.JSONDecodeError) as exc:
+            raise ClipError(f"Error al consultar Ollama visión: {exc}") from exc
+        content = data.get("message", {}).get("content", data.get("response", ""))
+        return _parse_json(str(content))
+
 
 def analyze_transcript(
     client: OllamaClient,
@@ -113,11 +233,14 @@ def analyze_transcript(
     settings: ClipSettings,
     *,
     chunk_chars: int = 12000,
+    style: str = "auto",
 ) -> tuple[dict[str, Any], list[ClipCandidate]]:
     chunks = chunk_transcript(transcript, chunk_chars)
     if len(chunks) == 1:
-        prompt = selection_prompt(chunks[0], settings)
-        return normalize_selection(client.generate(prompt), transcript, settings)
+        prompt = selection_prompt(chunks[0], settings, style=style)
+        summary, candidates = normalize_selection(client.generate(prompt), transcript, settings)
+        summary["estilo_aplicado"] = _resolve_style(summary, style)
+        return summary, candidates
 
     settings_per_chunk = ClipSettings(
         clip_count=max(settings.clip_count * 2, 8),
@@ -127,7 +250,7 @@ def analyze_transcript(
     summaries: list[dict[str, Any]] = []
     all_candidates: list[ClipCandidate] = []
     for number, chunk in enumerate(chunks, start=1):
-        raw = client.generate(selection_prompt(chunk, settings_per_chunk))
+        raw = client.generate(selection_prompt(chunk, settings_per_chunk, style=style))
         summary, candidates = normalize_selection(raw, chunk, settings_per_chunk)
         if summary["general"]:
             summaries.append(summary)
@@ -139,6 +262,7 @@ def analyze_transcript(
         temperature=0.1,
     )
     summary, candidates = normalize_selection(raw, transcript, settings)
+    summary["estilo_aplicado"] = _resolve_style(summary, style)
     if not candidates:
         candidates = dedupe_candidates(all_candidates, settings.clip_count)
     if not summary["general"] and summaries:
@@ -147,17 +271,29 @@ def analyze_transcript(
     return summary, candidates
 
 
-def selection_prompt(transcript: Transcript, settings: ClipSettings) -> str:
+def selection_prompt(transcript: Transcript, settings: ClipSettings, *, style: str = "auto") -> str:
+    gaming_note = (
+        "Para gaming: cada clip debe contener Tensión, Clímax y Reacción completos; prioriza sonido de acción "
+        "y exclamaciones sobre cantidad de palabras.\n"
+        if style == "gaming"
+        else ""
+    )
     return (
         f"Selecciona hasta {settings.clip_count} clips de la siguiente transcripción.\n"
+        f"PERFIL EDITORIAL ({style}): {style_prompt(style)}\n"
         f"Duración total: {transcript.total_duration():.1f} segundos. Idioma: {transcript.language or 'detectar'}.\n"
         f"Cada clip debe durar entre {settings.min_duration:.0f} y {settings.max_duration:.0f} segundos.\n"
+        f"{gaming_note}"
         "Elige momentos con gancho, tensión, humor, revelación, consejo práctico o cierre memorable. "
         "Cada clip debe entenderse sin contexto previo. No inventes contenido que no esté en la transcripción.\n"
         "Devuelve 'resumen' con: general (2-4 frases), temas (3-6 palabras clave), tono y audiencia.\n"
-        "Devuelve 'clips' con: inicio y fin en segundos decimales dentro de la duración total, "
+        "Devuelve 'estilo_aplicado' y 'clips' con: inicio y fin en segundos decimales dentro de la duración total, "
         "titulo (máximo 70 caracteres, gancho), descripcion (1-2 frases lista para publicar), "
-        "tags (5-8 palabras clave sin #), razon (por qué puede viralizarse) y score (0 a 1).\n\n"
+        "tags (5-8 palabras clave sin #), razon (por qué puede viralizarse), score (0 a 1), "
+        "rank, score_total (1-100), subestilo, gancho_3s, razonamiento_editorial, "
+        "evidencia_acustica_visual, hook_visual_pantalla (4-5 palabras), titulo_corto, "
+        "descripcion_redes (copy listo con pregunta abierta) y hashtags (5 sin #).\n"
+        "Usa las etiquetas [PAUSA x.xs], [ÉNFASIS ALTO] y [REACCIÓN/RISAS] como evidencia.\n\n"
         "TRANSCRIPCIÓN CON MARCAS DE TIEMPO [inicio-fin]:\n"
         f"{format_transcript(transcript)}\n\n"
         "Responde solo con el JSON solicitado."

@@ -79,6 +79,9 @@ def _transcribe_faster_whisper(
             str(audio),
             language=language,
             word_timestamps=True,
+            beam_size=1,
+            vad_filter=True,
+            vad_parameters=dict(min_silence_duration_ms=600),
         )
         raw_segments = [
             {

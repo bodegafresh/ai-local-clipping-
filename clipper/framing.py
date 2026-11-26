@@ -14,7 +14,7 @@ def find_speaker_crop(
     end: float,
     *,
     samples: int = 15,
-) -> tuple[int, int, int, int] | None:
+) -> tuple[tuple[int, int, int, int], float] | None:
     cascade_path = _cascade_path()
     if cascade_path is None:
         return None
@@ -76,7 +76,9 @@ def find_speaker_crop(
     center = sum(position * weight for position, weight in group) / total
     x = int(round(center - crop_width / 2))
     x = max(0, min(width - crop_width, x))
-    return x, 0, crop_width, height
+    consistency = total / sum(weight for _, weight in detections)
+    strength = min(1.0, (total / len(times)) * 20)
+    return (x, 0, crop_width, height), round(strength * consistency, 3)
 
 
 def _cascade_path() -> Path | None:
